@@ -1,0 +1,193 @@
+---
+title: "Geoscipting - Exercise 9"
+author: "Chantalle Diepmaat, Tom Hardy"
+date: "January 18, 2018"
+output: html_document
+---
+
+```{r label = "setup and packages", eval = TRUE, echo = TRUE}
+# install and load packages
+if(!("knitr" %in% rownames(installed.packages()))) {
+  install.packages("knitr")}
+if(!("raster" %in% rownames(installed.packages()))) {
+  install.packages("raster")}
+if(!("hydroGOF" %in% rownames(installed.packages()))) {
+  install.packages("hydroGOF")}
+
+library(knitr)
+library(raster)
+library(hydroGOF)
+
+# set some default options for the knitr package
+knitr::opts_chunk$set(echo = TRUE)
+
+# empty work environment
+rm(list = ls())
+```
+
+
+```{r label = "directories", eval = TRUE, echo = TRUE}
+# create directories, please set wd by Session -> Set Working Directory -> To Source File Location
+if (!(file.exists('data'))) {
+  dir.create(file.path('data'))
+  }
+if (!(file.exists('R'))) {
+  dir.create(file.path('R'))
+  }
+if (!(file.exists('output'))) {
+  dir.create(file.path('output'))
+  }
+```
+
+
+```{r label = "download_data", echo = TRUE, eval = TRUE}
+# download and unzip the dataset
+url <- "https://github.com/GeoScripting-WUR/AdvancedRasterAnalysis/raw/gh-pages/data/GewataBands.zip"
+method <- "auto" # change to "wget" or "curl" if "auto" does not work
+download.file(url = url, destfile = "data/GewataBands.zip", method = method)
+unzip("data/GewataBands.zip", exdir = "data")
+```
+
+
+```{r label = "load_data", echo = TRUE, eval = TRUE}
+# create path where datasets are stored
+GewataPath <- list.files(pattern = glob2rx('*.rda'), full.names = TRUE, path = 'data') # or 'glob2rx('Gewata*.rda')'
+
+# load all data included in the path
+for(i in 1:length(GewataPath)) {
+  load(GewataPath[i])
+}
+```
+
+
+```{r label = "raster_brick", echo = TRUE, eval = TRUE}
+# remove pixels with values larger than 100 (cloud mask, water)
+vcfGewata[vcfGewata > 100] <- NA
+
+# build raster bricks containing both all data and selections of the data (for plotting later on)
+alldata <- brick(GewataB1, GewataB2, GewataB3, GewataB4, GewataB5, GewataB7, vcfGewata)
+subdata1 <- brick(GewataB1, GewataB2, vcfGewata)
+subdata2 <- brick(GewataB3, GewataB4, vcfGewata)
+subdata3 <- brick(GewataB5, GewataB7, vcfGewata)
+
+names(alldata) <- c("band1", "band2", "band3", "band4", "band5", "band7", "VCF")
+names(subdata1) <- c("band1", "band2", "VCF")
+names(subdata2) <- c("band3", "band4", "VCF")
+names(subdata3) <- c("band5", "band7", "VCF")
+```
+
+
+```{r label = "plot_relations", echo = TRUE, eval = TRUE}
+# create scatterplot, histogram diagrams from the individual bands vs. VCF
+par(mfrow = c(3,1), oma = c(0, 0, 2, 0))
+pairs(subdata1)
+title("Relations between band 1 and 2 vs VCF", outer = TRUE)
+pairs(subdata2)
+title("Relations between band 3 and 4 vs VCF", outer = TRUE)
+pairs(subdata3)
+title("Relations between band 5 and 7 vs VCF", outer = TRUE)
+```
+
+
+### Interpretation of scatterplots and histograms
+According to the scatterplots and correlation coefficients, the correlations between VCF and bands 2, 3, 5, and 7 respectively, appear to be high. On the other hand, the correlation between band 1 and VCF looks reasonable, and lastly, the correlation between band 4 and VCF seems to be low.
+
+With respect to normal distributions: Bands 1 and 4 seem to be normally distributed, bands 2, 3, 5, and 7 appear to be right skewed and the VCF band looks a bit left skewed. This could be one explanation for the respective correlations between the bands and the VCF.
+
+
+```{r label = "linear model and prediction", echo = TRUE, eval = TRUE}
+# extract all data to a data.frame
+df <- as.data.frame(getValues(alldata))
+
+# fit a multiple linear model and check the coefficients table
+lm_fit <- lm(VCF ~ band1 + band2 + band3 + band4 + band5 + band7, data = df)
+summary(lm_fit)$coefficients
+
+# predict new raster based on lm_fit
+vcfPredict <- raster::predict(alldata[[-7]], model = lm_fit, na.rm = TRUE)
+```
+
+
+### Interpretation coefficients table
+According to the linear model summary, all t values (except for the one of band 7) are significant (with p-values all very close to zero), so we considered removing band7. However, that band has a very high correlation with VCF, so we decided to keep all bands in the linear model for predicting tree cover.
+
+
+```{r label = "plot_maps", echo = TRUE, eval = TRUE}
+# plot the observed and the predicted tree cover maps
+par(mfrow = c(1, 2), oma = c(0, 0, 2, 0))
+plot(vcfGewata)
+plot(vcfPredict)
+title("Observed tree cover map (left) and predicted tree cover map", outer = TRUE)
+```
+
+
+```{r label = "RMSE whole map", echo = TRUE, eval = TRUE}
+# apply the RMSE function from the hydroGOF package
+# vcfPredict is the predicted tree cover map, vcfGewata is the observed tree cover map
+# create data frames
+sim = as.data.frame(getValues(vcfPredict))
+obs = as.data.frame(getValues(vcfGewata))
+
+# calculate the RMSE
+RMSEWholeField <- rmse(sim = sim, obs = obs, na.rm = TRUE)
+```
+
+
+```{r label = "training_classes", echo = TRUE, eval = TRUE}
+# derive the training classes
+trainingPoly@data$Code <- as.numeric(trainingPoly@data$Class)
+classes <- rasterize(trainingPoly, vcfPredict, field = "Code")
+
+# plot the training polygons
+cols = c("orange", "darkgreen", "lightblue")
+plot(classes, col = cols, legend = FALSE, main = "Training polygons based on landuse classes")
+legend("bottomright", legend = c("cropland", "forest", "wetland"), fill = cols, bg = "white")
+```
+
+
+```{r label = "RMSE classes", echo = TRUE, eval = TRUE}
+ # derive the three separate classes (1 = cropland, 2 = forest, 3 = wetland)
+class1 <- classes
+class2 <- classes
+class3 <- classes
+
+class1[class1 != 1] <- NA
+class2[class2 != 2] <- NA
+class3[class3 != 3] <- NA
+
+# mask the raster values based on the three separate classes
+vcfPredictClass1 <- mask(vcfPredict, class1)
+vcfPredictClass2 <- mask(vcfPredict, class2)
+vcfPredictClass3 <- mask(vcfPredict, class3)
+
+vcfGewataClass1 <- mask(vcfGewata, class1)
+vcfGewataClass2 <- mask(vcfGewata, class2)
+vcfGewataClass3 <- mask(vcfGewata, class3)
+
+# create data frames
+sim1 <- as.data.frame(getValues(vcfPredictClass1))
+sim2 <- as.data.frame(getValues(vcfPredictClass2))
+sim3 <- as.data.frame(getValues(vcfPredictClass3))
+
+obs1 <- as.data.frame(getValues(vcfGewataClass1))
+obs2 <- as.data.frame(getValues(vcfGewataClass2))
+obs3 <- as.data.frame(getValues(vcfGewataClass3))
+
+# calculate the rmse values
+RMSECropland <- hydroGOF::rmse(sim = sim1, obs = obs1)
+RMSEForest <- hydroGOF::rmse(sim = sim2, obs = obs2)
+RMSEWetland <- hydroGOF::rmse(sim = sim3, obs = obs3)
+
+# create a barplot of RMSE values
+barplot(c(RMSEWholeField, RMSECropland, RMSEForest, RMSEWetland),
+        names.arg = c("whole field", "cropland", "forest", "wetland"),
+        main = "RMSE values for the whole map and per landuse class",
+        col = "khaki", ylab = "RMSE")
+```
+
+
+### RMSE whole raster dataset
+The RMSE for the prediction of the tree cover for the whole field is $`r RMSEWholeField`$, while the RMSE values are $`r RMSECropland`$, $`r RMSEForest`$, and $`r RMSEWetland`$, see also the barplot. In comparison, the class forest is predicted best, while wetland is predicted worst (according to the training polygons). The RMSE for the whole field lies more or less in between the RMSE values for the three classes. This gives a good summary of the prediction accuracy for both the whole field and the three separate landuse classes.
+
+
+##############################################################################################################
